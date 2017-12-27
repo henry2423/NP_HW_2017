@@ -1,0 +1,241 @@
+//
+//  main.cpp
+//  chatroom
+//
+//  Created by Henry on 22/10/2017.
+//  Copyright © 2017 henry. All rights reserved.
+//
+
+#include <iostream>
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <unistd.h>
+#include <cerrno>
+#include <fcntl.h>
+#include <signal.h>
+
+#define MAXLINE 8000
+using namespace std;
+
+struct File_buf {
+    char file_name[50];
+    ssize_t file_size;
+} File_buf;
+
+void str_cli(FILE *fp, int sockfd) {
+    int maxfdp1, stdineof;
+    fd_set rset;
+    char buf[MAXLINE];
+    ssize_t n, nwritten;
+    stdineof = 0;
+    FD_ZERO(&rset);
+    
+    for ( ; ; ) {
+        
+        if (stdineof == 0)
+            FD_SET(fileno(fp), &rset);
+        FD_SET(sockfd, &rset);
+        
+        maxfdp1 = max(fileno(fp), sockfd) + 1;
+        select(maxfdp1, &rset, NULL, NULL, NULL);
+        
+        if (FD_ISSET(sockfd, &rset)) { /* socket is readable */
+            
+            struct File_buf file_data;
+            long file_size;
+            long current_file_size = 0;
+            char file_buf[80];
+            char file_name[50];
+            
+            //recving file_name and file_size
+            if( (n = read(sockfd, &file_data, sizeof(file_data))) == 0) { //no connection
+                if (stdineof == 1)
+                    return ;     /* normal termination */
+                else {
+                    printf("str_cli: server terminated prematurely \n");
+                    exit(1);
+                }
+            }
+            else {
+                //get file name
+                strcpy(file_name, file_data.file_name);
+                printf("%s ",file_name);
+                file_size = file_data.file_size;
+                printf("%zd\n",file_size);
+            }
+            
+            //change to file name temp
+            for(int i = 0 ; i<50; i++) {
+                if(file_name[i] == '\n' || file_name[i] == '\0') {
+                    file_name[i] = 'c';
+                    file_name[i+1] = '\0';
+                    break;
+                }
+            }
+            
+            //open a new file to save
+            FILE *client_file = fopen(file_name, "wb");
+            
+            //recving file data
+            while(1) {
+                //decide how much bytes should read in
+                ssize_t read_bytes = 8000;
+                if( file_size - current_file_size < 8000) {
+                    read_bytes = file_size - current_file_size;
+                }
+                
+                //read data from socket
+                if ( (n = read(sockfd, buf, read_bytes)) < 0) {
+                    printf("read error on socket\n");
+                    exit(0);
+                } else if (n == 0) {
+                    printf("EOF on socket\n");
+                    fclose(client_file);
+                    break;
+                } else {
+                    fprintf(stderr, "read %zd bytes from socket\n", n);
+                    
+                    //save in file
+                    if ( (nwritten = write(fileno(client_file), buf, n)) < 0) {
+                        printf("write error to file");
+                        fclose(client_file);
+                    } else {
+                        fprintf(stderr, "wrote %zd bytes to file\n", nwritten);
+                        current_file_size += nwritten;
+                        if(current_file_size == file_size) {
+                            printf("EOF on file\n");
+                            fclose(client_file);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        
+        if (FD_ISSET(fileno(fp), &rset)) { /* input is readable */
+            if ( fgets(buf, sizeof(buf), fp) == NULL ) {
+                stdineof = 1;
+                shutdown(sockfd, SHUT_WR); /* send FIN */
+                FD_CLR(fileno(fp), &rset);
+                continue;
+            }
+            
+            //buf[n] = '\0';
+            //User can type command below to terminate the process at any time
+            if(strcmp(buf, "exit\n") == 0) {
+                stdineof = 1;
+                shutdown(sockfd, SHUT_WR); /* send FIN */
+                FD_CLR(fileno(fp), &rset);
+                continue;
+            } else {
+                char *pch = strtok(buf, " ");
+                //send data to server
+                if(strcmp(pch, "put") == 0) {
+                    //file wrap data
+                    struct File_buf file_data;
+                    
+                    FILE * client_file;
+                    pch = strtok(NULL, "\r\n");
+                    client_file = fopen(pch, "rb");
+                    if (client_file == NULL) {
+                        fputs ("File error\n",stderr);
+                        continue;
+                    }
+                    //warp in file name
+                    printf("%s ", pch);
+                    strcpy(file_data.file_name, pch);
+                    
+                    //get the file size
+                    fseek(client_file, 0, SEEK_END);
+                    long file_size = ftell(client_file);
+                    fseek(client_file, 0, SEEK_SET);
+                    //wrap in file size
+                    printf("%zd\n", file_size);
+                    file_data.file_size = file_size;
+                    
+                    
+                    //send file name and size to server
+                    write(sockfd, &file_data, sizeof(file_data));
+                    
+                    //send server file data
+                    ssize_t numbytes;
+                    while(!feof(client_file)){
+                        numbytes = fread(buf, sizeof(char), sizeof(buf), client_file);
+                        printf("fread %zd bytes, ", numbytes);
+                        numbytes = write(sockfd, buf, numbytes);
+                        printf("Sending %zd bytes\n",numbytes);
+                    }
+
+                    fclose(client_file);
+                }
+                //sleeping
+                else if(strcmp(pch, "sleep") == 0) {
+                    pch = strtok(NULL, " \r\n");
+                    int sleep_time = atoi(pch);
+                    printf("Client starts to sleep\n");
+                    for(int i = 0; i < sleep_time; i++) {
+                        printf("Sleep %d\n", i);
+                        sleep(1);
+                    }
+                    printf("Client wakes up\n");
+                }
+            }
+            
+        }
+    }
+}
+
+static void sig_alrm(int signo) {
+    return ;    //just interrupt the recv()
+}
+
+
+
+int main(int argc, const char * argv[]) {
+    
+    int sockfd;
+    ssize_t recv_size;
+    struct sockaddr_in servaddr;
+    struct sockaddr_in clientaddr;
+    
+    signal(SIGPIPE, SIG_IGN); //make sure no SIGPIPE happen
+    signal(SIGALRM, sig_alrm);
+    siginterrupt(SIGALRM, 1);
+    
+    if(argc != 4) {
+        printf("wrong command\n");
+        exit(1);
+    }
+    
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    bzero(&servaddr, sizeof(servaddr));
+    servaddr.sin_family = AF_INET;
+    inet_aton(argv[1], &servaddr.sin_addr);
+    //servaddr.sin_port = htons(60841);
+    servaddr.sin_port = ntohs(atol(argv[2]));
+    
+    //connect to server
+    if ( connect(sockfd, (struct sockaddr *) &servaddr, sizeof(struct sockaddr)) ) {
+        printf("Error : Connect Failed \n");
+        exit(1);
+    }
+    
+    
+    //register the username to server
+    char username[50];
+    strcpy(username, argv[3]);
+    write(sockfd, username, strlen(username));
+    
+    str_cli(stdin, sockfd);
+    
+    return 0;
+}
+
+
+
